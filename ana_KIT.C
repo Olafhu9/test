@@ -18,9 +18,13 @@
 using namespace ROOT::VecOps;
 using namespace std;
 using rvec_f = RVec<float>;
+using rvec_d = RVec<double>;
 using rvec_b = RVec<bool>;
 using rvec_i = RVec<int>;
 using Impl_i = vector<int, ROOT::Detail::VecOps::RAdoptAllocator<int>>;
+
+using FourVector = ROOT::Math::PtEtaPhiMVector;
+using FourVectorVec = std::vector<FourVector>;
 
 //********** sort jets by btag & pT
 vector<int> sortbtag(rvec_f jet_pt, rvec_f jet_eta, rvec_f btag){
@@ -97,13 +101,6 @@ int jet_perm_cat (vector<TLorentzVector> Jets, TLorentzVector addjet1, TLorentzV
 
 //********** set TLorentzVector
 TLorentzVector set_lorentz (float pt, float eta, float phi, float m){
-    TLorentzVector p;
-    p.SetPtEtaPhiM(pt, eta, phi, m);
-    return p;
-}
-
-//********** set TLorentzVector
-TLorentzVector set_lorentzw (int pt, int eta, int phi, int m){
     TLorentzVector p;
     p.SetPtEtaPhiM(pt, eta, phi, m);
     return p;
@@ -206,6 +203,67 @@ float setSt (TLorentzVector p1, TLorentzVector p2, TLorentzVector p3, TLorentzVe
     return Sts;
 }
 
+//********** generated 4 vector
+FourVectorVec gen4vec(rvec_f &pt, rvec_f &eta, rvec_f &phi, rvec_f &mass)
+{
+    const int nsize = pt.size();
+    FourVectorVec fourvecs;
+    fourvecs.reserve(nsize);
+    for (auto i=0; i<nsize; i++){
+        fourvecs.emplace_back(pt[i], eta[i], phi[i], fabs(mass[i]));
+    }
+    return fourvecs;
+}
+
+//********** Delta R between lepton and jet
+rvec_d dRlepton (FourVectorVec &jets, FourVectorVec &leptons){
+    rvec_d dr_lepjet;
+
+    for ( auto ajet: jets ){
+
+        double mindR = FLT_MAX;
+        for ( auto alepton: leptons ){
+
+            double dR = ROOT::Math::VectorUtil::DeltaR(ajet, alepton);
+            if( dR < mindR ) mindR = dR;
+        }
+        dr_lepjet.emplace_back(mindR);
+    }
+    return dr_lepjet;
+}
+
+//********** if the lepton is from top
+rvec_b isleptonfromtop (FourVectorVec &p, rvec_f &pdgId, rvec_f &midx){
+    rvec_b out;
+    unsigned int np = p.size();
+    bool flag = false;
+
+    // GenParticle loop
+    for( unsigned int i = 0; i < np; i++ ){
+        flag = false;
+        //should be muon or electron
+        if ( !( abs( pdgId[i] ) == 13 || abs( pdgId[i] ) == 11) ) {
+            out.emplace_back(flag);
+            continue;
+        }
+        //lets find the mother of this particle...
+        int moid = midx[i];
+        for( unsigned int k = 0; k < np-1; k++ ){
+          //sometimes if the index goes out of the index range segment violates 
+            if (moid > int(pdgId.size()) || moid < 0 ) break;
+
+            moid = midx[ moid ];
+            if( abs( pdgId[ moid ] ) == 6) {
+                flag = true;
+                break;
+            }
+
+        }
+        out.emplace_back(flag);
+    }
+    return out;
+}
+
 // root -l ana.C'(2018, "ttbb")'
 void ana_KIT(int year, string process, string VFP=""){
     string inputfile, outputfile;
@@ -256,10 +314,49 @@ void ana_KIT(int year, string process, string VFP=""){
     auto df_goodjet = df_goodlepton.Filter("ngoodjets >=6 ", "Events with at least 4 goodjets");
     auto df_bjet = df_goodjet.Filter("nbjets_m >= 4", "Events with at least 2 medium b-jets")
 
-                             //.Define("addbjet1", set_lorentz, {"addbjet1_pt", "addbjet1_eta", "addbjet1_phi", "addbjet1_mass"})
-                             //.Define("addbjet2", set_lorentz, {"addbjet2_pt", "addbjet2_eta", "addbjet2_phi", "addbjet2_mass"})
-                             //.Define("gen_dRbb", deltaR, {"addbjet1", "addbjet2"})
-                             //.Define("gen_mbb", invmass, {"addbjet1", "addbjet2"})
+                             // genLepton removal with GenParticle collection: muon or electron that are from top 
+                             .Define("p4_GenJet", ::gen4vec, {"genJet_Pt","genJet_Eta","genJet_Phi","genJet_M"})
+                             .Define("p4_GenPart", ::gen4vec, {"genPart_Pt","genPart_Eta","genPart_Phi","genPart_M"})
+
+                             .Define("isleptonfromtop", isleptonfromtop, {"p4_GenPart","genPart_pdgId","genPart_genPartIdxMother"})
+                             .Define("Genparts_pt","genPart_Pt[isleptonfromtop]")
+                             .Define("Genparts_eta","genPart_Eta[isleptonfromtop]")
+                             .Define("Genparts_phi","genPart_Phi[isleptonfromtop]")
+                             .Define("Genparts_mass","genPart_M[isleptonfromtop]")
+                             .Define("p4_Genparts", ::gen4vec, {"Genparts_pt","Genparts_eta","Genparts_phi","Genparts_mass"})
+                             .Define("origin_gendR", dRlepton, {"p4_GenJet","p4_Genparts"})
+
+                             // select additional Jets (if you want to use this)
+                             //.Define("quarksfromW",isquarkfromW,{"p4_GenPart","GenPart_pdgId","GenPart_genPartIdxMother"})
+                             //.Define("quarksfromW_eta","GenPart_eta[quarksfromW]")
+                             //.Define("quarksfromW_phi","GenPart_phi[quarksfromW]")
+                             //.Define("isaddJet",isaddJets,{"genJet_Eta","genJet_Phi","quarksfromW_eta","quarksfromW_phi","genJet_nBHadFromT","genJet_nBHadFromTbar","genJet_nBHadFromW","genJet_nBHadOther","genJet_nCHadFromW","genJet_nCHadOther"});
+
+                             // construct Additional b jets only for the moment
+                             //.Define("sel_addjets","origin_gendR > 0.4 && isaddJet && genJet_pt > 20 && abs(genJet_eta) < 2.4")
+                             .Define("sel_addbjets", "origin_gendR > 0.4 && (genJet_nBHadFromT + genJet_nBHadFromTbar + genJet_nBHadFromW) == 0 && genJet_nBHadOther > 0") //pt>20 && |eta|<2.4 selections are already applied in genJet_n*Had*
+                             //.Define("sel_addcjets", "origin_gendR > 0.4 && genJet_nCHadFromW == 0 && genJet_nCHadOther > 0"); //pt>20 && |eta|<2.4 selections are already applied in genJet_n*Had*
+                      
+                             .Define("addbjets_pt","genJet_Pt[sel_addbjets]")
+                             .Define("addbjets_eta","genJet_Eta[sel_addbjets]")
+                             .Define("addbjets_phi","genJet_Phi[sel_addbjets]")
+                             .Define("addbjets_mass","genJet_M[sel_addbjets]")
+                             .Define("p4_addbjets", ::gen4vec, {"addbjets_pt","addbjets_eta","addbjets_phi","addbjets_mass"})
+
+                             .Define("addbjet1_pt","addbjets_pt[0]")
+                             .Define("addbjet1_eta","addbjets_eta[0]")
+                             .Define("addbjet1_phi","addbjets_phi[0]")
+                             .Define("addbjet1_mass","addbjets_mass[0]")
+
+                             .Define("addbjet2_pt","addbjets_pt[1]")
+                             .Define("addbjet2_eta","addbjets_eta[1]")
+                             .Define("addbjet2_phi","addbjets_phi[1]")
+                             .Define("addbjet2_mass","addbjets_mass[1]")
+
+                             .Define("addbjet1", set_lorentz, {"addbjet1_pt", "addbjet1_eta", "addbjet1_phi", "addbjet1_mass"})
+                             .Define("addbjet2", set_lorentz, {"addbjet2_pt", "addbjet2_eta", "addbjet2_phi", "addbjet2_mass"})
+                             .Define("gen_dRbb", deltaR, {"addbjet1", "addbjet2"})
+                             .Define("gen_mbb", invmass, {"addbjet1", "addbjet2"})
 
                              // reco particles
                              .Define("lepton_pt", "Lep_Pt[0]")
@@ -396,7 +493,7 @@ void ana_KIT(int year, string process, string VFP=""){
 //          // category
             //"event_category", "jet_perm",
             //*** Global var
-            "ngoodjets", "nulep_pt", "St", "Ht", "nbjets_m", "ncjets_m", "lepton_Pt", "lepton_Eta", "lepton_Phi", "lepton_M", "MET_T1_Pt_nom", "MET_T1_Phi_nom",
+            "ngoodjets", "nulep_pt", "St", "Ht", "nbjets_m", "ncjets_m", "lepton_pt", "lepton_eta", "lepton_phi", "lepton_m", "MET_T1_Pt_nom", "MET_T1_Phi_nom",
             //*** low level var of jets
             "jet1_pt", "jet1_eta", "jet1_m", "jet1_btag", "jet1_cvsb", "jet1_cvsl", "dRlep1", "dRnu1", "dRnulep1", "invmlep1", "invmnu1",
             "jet2_pt", "jet2_eta", "jet2_m", "jet2_btag", "jet2_cvsb", "jet2_cvsl", "dRlep2", "dRnu2", "dRnulep2", "invmlep2", "invmnu2",
